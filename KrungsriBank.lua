@@ -246,7 +246,7 @@ local function resolveFormAction(action, basePath)
   return baseURL .. baseDir .. "/" .. action
 end
 
--- onclick-String parsen → {target, argument} oder nil
+-- Parse onclick string → {target, argument} or nil
 local function parseDoPostBack(onclickStr)
   if not onclickStr then return nil end
   -- Decode HTML entities first
