@@ -12,6 +12,26 @@ A [MoneyMoney](https://moneymoney-app.com) extension for **Krungsri Bank (BAY) T
 - Pure-Lua AES-ECB implementation for portal authentication (no external dependencies)
 - Handles ASPX ViewState and AJAX-based transaction loading automatically
 
+## How It Works
+
+The extension implements MoneyMoney's `WebBanking` Lua API and communicates with the Krungsri Biz Online portal at `krungsribizonline.com`.
+
+### Authentication
+
+The portal uses ASP.NET Web Forms with AES-ECB-PKCS7 password encryption. Login is a two-step process:
+
+1. `GET` the login page → extract ASP.NET `__ViewState`, `__EventValidation`, and the AES encryption key embedded in the page
+2. Encrypt the password using AES-ECB-PKCS7 (Base64-encoded), then `POST` the encrypted credentials together with the form tokens → receive a session cookie
+
+The AES-ECB encryption is implemented entirely in Lua with no external dependencies — including the S-Box lookup table, key expansion, `GF(2⁸)` multiplication (`gmul`), and PKCS7 padding.
+
+### Data Retrieval
+
+The portal loads transaction data via ASP.NET AJAX `UpdatePanel` (`__ASYNCPOST`). The extension reverse-engineers the `__doPostBack` calls the browser would normally make to navigate the account list and fetch transaction pages:
+
+- **Accounts:** parsed from the initial post-login page HTML
+- **Transactions:** fetched via ASYNCPOST with `__VIEWSTATE`/`__EventValidation` tokens refreshed from each response
+
 ## Requirements
 
 - [MoneyMoney](https://moneymoney-app.com) for macOS (any recent version)
