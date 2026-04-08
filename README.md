@@ -79,8 +79,7 @@ cp moneymoney-krungsribank/KrungsriBank.lua \
 
 | Version | Changes |
 |---------|---------|
-| 1.09 | Fix HTML entity decoding for form action URLs (ASYNCPOST) |
-| 1.08 | Previous release |
+| 1.09 | Fix HTML entity decoding for form action URLs (`&amp;` → `&` in ASYNCPOST) |
 | 1.00 | Initial public release |
 
 ## Contributing

@@ -3,11 +3,11 @@
 -- Krungsri Bank (BAY) Thailand – Krungsri Biz Online
 -- Version: 1.09
 --
--- Änderung gegenüber 1.08:
---  - formAction HTML-Entities dekodieren nach Regex-Extraktion
---    (&amp;ma= → &ma= in der ASYNCPOST-URL)
---  - decodeHtmlEntities() wird jetzt konsequent auf alle
---    direkt aus HTML-Attributen gelesenen Werte angewendet
+-- Changes in 1.09:
+--  - Decode HTML entities in form action after regex extraction
+--    (&amp;ma= → &ma= in the ASYNCPOST URL)
+--  - decodeHtmlEntities() now applied consistently to all
+--    attribute values read directly from HTML
 -- ============================================================
 
 WebBanking {
@@ -129,7 +129,7 @@ local function aesEcbBase64(password, keyStr)
 end
 
 -- ============================================================
--- Hilfsfunktionen
+-- Helper Functions
 -- ============================================================
 
 local function parseDate(str)
@@ -160,8 +160,8 @@ local function stripHtml(s)
           :match("^%s*(.-)%s*$")
 end
 
--- HTML-Entities in Attributwerten dekodieren
--- Wird auf ALLE direkt per Regex aus HTML gelesenen Attributwerte angewendet
+-- Decode HTML entities in attribute values.
+-- Applied to ALL attribute values read directly from HTML via regex.
 local function decodeHtmlEntities(s)
   if not s then return "" end
   return s:gsub("&quot;", '"')
@@ -196,7 +196,7 @@ local function buildFormBody(fields)
   return table.concat(parts, "&")
 end
 
--- Hidden-Input-Felder aus HTML extrahieren → {name = value}
+-- Extract hidden input fields from HTML → {name = value}
 local function extractHiddenFields(html)
   local fields = {}
   for tag in html:gmatch("<input%s[^>]+>") do
@@ -215,21 +215,21 @@ local function extractHiddenFields(html)
   return fields
 end
 
--- Form-Action-Attributwert aus HTML lesen (mit Entity-Dekodierung)
--- Gibt nil zurück wenn nicht gefunden
+-- Read the form action attribute from HTML (with entity decoding).
+-- Returns nil if not found.
 local function extractFormAction(html)
   local action =
     html:match('<form[^>]+name%s*=%s*"aspnetForm"[^>]+action%s*=%s*"([^"]*)"') or
     html:match('<form[^>]+action%s*=%s*"([^"]*)"[^>]+name%s*=%s*"aspnetForm"')
   if action then
-    -- HTML-Entities dekodieren: action="./MyAccount.aspx?token=...&amp;ma=123"
+    -- Decode HTML entities: action="./MyAccount.aspx?token=...&amp;ma=123"
     -- → "./MyAccount.aspx?token=...&ma=123"
     return decodeHtmlEntities(action)
   end
   return nil
 end
 
--- Relativen Form-Action zu absoluter URL auflösen
+-- Resolve a relative form action to an absolute URL.
 local function resolveFormAction(action, basePath)
   if not action or action == "" then
     return baseURL .. basePath
@@ -240,7 +240,7 @@ local function resolveFormAction(action, basePath)
   if action:sub(1,1) == "/" then
     return baseURL .. action
   end
-  -- Relativ: "./MyAccount.aspx?..." oder "MyAccount.aspx?..."
+  -- Relative path: "./MyAccount.aspx?..." or "MyAccount.aspx?..."
   action = action:gsub("^%./", "")
   local baseDir = basePath:match("^(.*)/[^/]*$") or ""
   return baseURL .. baseDir .. "/" .. action
@@ -249,7 +249,7 @@ end
 -- onclick-String parsen → {target, argument} oder nil
 local function parseDoPostBack(onclickStr)
   if not onclickStr then return nil end
-  -- HTML-Entities zuerst dekodieren
+  -- Decode HTML entities first
   local decoded = decodeHtmlEntities(onclickStr)
   local target = decoded:match(
     'WebForm_DoPostBackWithOptions%s*%(%s*new%s+WebForm_PostBackOptions%s*%(%s*"([^"]*)"'
@@ -267,7 +267,7 @@ local function parseDoPostBack(onclickStr)
   return nil
 end
 
--- Banner/CRM/Navigation-Felder filtern (nicht relevant für Transaktionsabfrage)
+-- Filter banner/CRM/navigation fields (not relevant for the transaction request)
 local function isBannerField(name)
   return name:find("banner",          1, true) ~= nil
       or name:find("Banner",          1, true) ~= nil
@@ -279,7 +279,7 @@ local function isBannerField(name)
 end
 
 -- ============================================================
--- Globale Session-Variable
+-- Global Session State
 -- ============================================================
 local connection = nil
 
@@ -300,40 +300,40 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   connection.useragent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " ..
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-  -- ── 1. Login-Seite laden ─────────────────────────────────────────────────
-  MM.printStatus("Lade Login-Seite ...")
+  -- ── 1. Load login page ───────────────────────────────────────────────────
+  MM.printStatus("Loading login page...")
   local loginURL         = baseURL .. loginPath
   local content, charset = connection:get(loginURL)
   if not content or #content == 0 then
-    return "Login-Seite nicht erreichbar."
+    return "Login page not reachable."
   end
 
-  -- ── 2. secretKey extrahieren ─────────────────────────────────────────────
+  -- ── 2. Extract secretKey ─────────────────────────────────────────────────
   local secretKey = content:match("var%s+secretKey%s*=%s*'([^']+)'")
                  or content:match('var%s+secretKey%s*=%s*"([^"]+)"')
   if not secretKey or #secretKey == 0 then
-    print("secretKey nicht gefunden:")
+    print("secretKey not found:")
     print(content:sub(1, 1500))
-    return "secretKey nicht in Login-Seite gefunden."
+    return "Secret key not found in login page."
   end
-  print(string.format("secretKey: %s (%d Bytes, AES-%d)",
+  print(string.format("secretKey: %s (%d bytes, AES-%d)",
         secretKey, #secretKey, #secretKey * 8))
 
-  -- ── 3. Passwort verschlüsseln ─────────────────────────────────────────────
+  -- ── 3. Encrypt password ──────────────────────────────────────────────────
   local hdPassword = aesEcbBase64(password, secretKey)
-  print("hdPassword: " .. #hdPassword .. " Zeichen Base64")
+  print("hdPassword: " .. #hdPassword .. " chars (Base64)")
 
-  -- ── 4. Hidden-Felder + Form-Action aus Login-Seite ───────────────────────
+  -- ── 4. Extract hidden fields and form action from login page ─────────────
   local hidden  = extractHiddenFields(content)
-  -- extractFormAction dekodiert &amp; → & automatisch
+  -- extractFormAction decodes &amp; → & automatically
   local postURL = resolveFormAction(extractFormAction(content), loginPath)
   print("Login POST → " .. postURL)
 
-  -- ── 5. imgLogin onclick parsen ────────────────────────────────────────────
+  -- ── 5. Parse imgLogin onclick ────────────────────────────────────────────
   local btnTag = content:match('<input[^>]+name%s*=%s*"ctl00%$cphLoginBox%$imgLogin"[^>]*>')
               or content:match('<input[^>]+id%s*=%s*"ctl00_cphLoginBox_imgLogin"[^>]*>')
 
-  local eventTarget   = "ctl00$cphLoginBox$imgLogin"  -- sicherer Default
+  local eventTarget   = "ctl00$cphLoginBox$imgLogin"  -- safe default
   local eventArgument = ""
 
   if btnTag then
@@ -346,12 +346,12 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
         eventArgument = dpb.argument
         print("DoPostBack → __EVENTTARGET='" .. eventTarget .. "'")
       else
-        print("onclick nicht parsebar – nutze Default: " .. eventTarget)
+        print("onclick not parseable – using default: " .. eventTarget)
       end
     end
   end
 
-  -- ── 6. POST-Body aufbauen ─────────────────────────────────────────────────
+  -- ── 6. Build POST body ───────────────────────────────────────────────────
   local explicitSet = {
     ["__VIEWSTATE"]=true, ["__VIEWSTATEGENERATOR"]=true,
     ["__VIEWSTATEENCRYPTED"]=true, ["__EVENTVALIDATION"]=true,
@@ -383,8 +383,8 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
 
   local postBody = buildFormBody(formFields)
 
-  -- ── 7. Login POST ─────────────────────────────────────────────────────────
-  MM.printStatus("Anmelden ...")
+  -- ── 7. Submit login POST ─────────────────────────────────────────────────
+  MM.printStatus("Signing in...")
   local loginResp = connection:request(
     "POST", postURL, postBody,
     "application/x-www-form-urlencoded",
@@ -392,21 +392,21 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   )
 
   if not loginResp then
-    return "Login-Request fehlgeschlagen."
+    return "Login request failed."
   end
 
-  -- ── 8. Erfolg prüfen ─────────────────────────────────────────────────────
+  -- ── 8. Check for success ─────────────────────────────────────────────────
   if loginResp:find("ctl00_cphLoginBox_txtUsernameSME")
   or loginResp:find("ctl00_cphLoginBox_hdPassword") then
     local errMsg =
       loginResp:match('class="[^"]*[Ee]rror[^"]*"[^>]*>(.-)</')  or
       loginResp:match('class="[^"]*[Ii]nvalid[^"]*"[^>]*>(.-)<!') or
       loginResp:match('<ul>%s*<li>(.-)</li>')
-    if errMsg then print("Server-Fehler: " .. stripHtml(errMsg)) end
+    if errMsg then print("Server error: " .. stripHtml(errMsg)) end
     return LoginFailed
   end
 
-  MM.printStatus("Erfolgreich angemeldet.")
+  MM.printStatus("Successfully signed in.")
   print("Login OK")
   return nil
 end
@@ -415,13 +415,13 @@ end
 -- ListAccounts
 -- ============================================================
 function ListAccounts(knownAccounts)
-  MM.printStatus("Lade Kontenliste ...")
+  MM.printStatus("Loading account list...")
 
   local portfolioURL     = baseURL .. "/BAY.KOL.Corp.WebSite/Pages/MyPortfolio.aspx"
   local content, charset = connection:get(portfolioURL)
 
-  if not content or #content == 0 then return "Portfolio-Seite nicht erreichbar." end
-  if content:find("Login%.aspx") then return "Session abgelaufen." end
+  if not content or #content == 0 then return "Portfolio page not reachable." end
+  if content:find("Login%.aspx") then return "Session expired." end
 
   local seen, accountLinks = {}, {}
   local function addLink(token, ma)
@@ -429,7 +429,7 @@ function ListAccounts(knownAccounts)
       seen[ma] = true
       token = urlDecode(token)
       table.insert(accountLinks, { token = token, ma = ma })
-      print("Konto-Link: ma=" .. ma)
+      print("Account link: ma=" .. ma)
     end
   end
 
@@ -441,9 +441,9 @@ function ListAccounts(knownAccounts)
   end
 
   if #accountLinks == 0 then
-    print("Keine Konto-Links. Portfolio (3000 Zeichen):")
+    print("No account links found. Portfolio (3000 chars):")
     print(content:sub(1, 3000))
-    return "Keine Konten gefunden."
+    return "No accounts found."
   end
 
   local accounts = {}
@@ -453,26 +453,26 @@ function ListAccounts(knownAccounts)
       "/BAY.KOL.Corp.WebSite/Pages/MyAccount.aspx" ..
       "?token=" .. urlEncode(link.token) .. "&ma=" .. link.ma
 
-    MM.printStatus("Lade Kontodetails (ma=" .. link.ma .. ") ...")
+    MM.printStatus("Loading account details (ma=" .. link.ma .. ")...")
     local acctContent = connection:get(acctURL)
 
     if not acctContent or #acctContent == 0 then
-      print("ma=" .. link.ma .. ": leere Antwort")
+      print("ma=" .. link.ma .. ": empty response")
     elseif acctContent:find("Login%.aspx") then
-      print("ma=" .. link.ma .. ": Session abgelaufen")
+      print("ma=" .. link.ma .. ": session expired")
     else
       local ddlVal =
         acctContent:match('ddlAccountNickName[^>]*>%s*<option[^>]+selected[^>]*value="([^"]+)"') or
         acctContent:match('ddlAccountNickName[^>]*>%s*<option[^>]*value="([^"]+)"')
 
       if not ddlVal or #ddlVal == 0 then
-        print("Dropdown nicht gefunden für ma=" .. link.ma)
+        print("Dropdown not found for ma=" .. link.ma)
       else
         local internalId, typeCode, nickname, acctNo =
           ddlVal:match("^(%d+)|(%d+)|([^|]*)|(%d+)$")
 
         if not acctNo or #acctNo < 6 then
-          print("Dropdown nicht parsebar: [" .. ddlVal .. "]")
+          print("Dropdown value not parseable: [" .. ddlVal .. "]")
         else
           local hdAccType =
             acctContent:match('id="ctl00_cphSectionData_hdACCTYPE"[^>]*value="([^"]*)"') or
@@ -494,7 +494,7 @@ function ListAccounts(knownAccounts)
           LocalStorage[acctNo .. "_ddl"]     = ddlVal
           LocalStorage[acctNo .. "_acctype"] = hdAccType
 
-          print(string.format("Konto: %s | Typ: %s | AccType: %s | Name: %s",
+          print(string.format("Account: %s | Type: %s | AccType: %s | Name: %s",
             displayNo, typeCode, hdAccType, nickname))
 
           table.insert(accounts, {
@@ -510,7 +510,7 @@ function ListAccounts(knownAccounts)
     end
   end
 
-  if #accounts == 0 then return "Keine gültigen Konten gefunden." end
+  if #accounts == 0 then return "No valid accounts found." end
   return accounts
 end
 
@@ -519,7 +519,7 @@ end
 -- ============================================================
 function RefreshAccount(account, since)
   local acctNo  = account.accountNumber
-  MM.printStatus("Aktualisiere " .. acctNo .. " ...")
+  MM.printStatus("Refreshing " .. acctNo .. "...")
 
   local token   = LocalStorage[acctNo .. "_token"]
   local ma      = LocalStorage[acctNo .. "_ma"]
@@ -527,7 +527,7 @@ function RefreshAccount(account, since)
   local accType = LocalStorage[acctNo .. "_acctype"] or "1"
 
   if not token or not ma then
-    return "Keine Session-Daten – bitte neu einloggen."
+    return "No session data – please sign in again."
   end
 
   local acctURL = baseURL ..
@@ -540,25 +540,25 @@ function RefreshAccount(account, since)
   local toDate   = os.date("%d/%m/%Y", os.time())
   local fromISO  = toIsoDateTime(fromTS)
   local toISO    = toIsoDateTime(os.time())
-  print("Zeitraum: " .. fromDate .. " – " .. toDate)
+  print("Date range: " .. fromDate .. " – " .. toDate)
 
-  -- ── Schritt 1: Kontoseite laden ──────────────────────────────────────────
-  MM.printStatus("Lade Kontoseite ...")
+  -- ── Step 1: Load account page ────────────────────────────────────────────
+  MM.printStatus("Loading account page...")
   local acctPage = connection:get(acctURL)
-  if not acctPage or #acctPage == 0 then return "Kontoseite nicht erreichbar." end
-  if acctPage:find("Login%.aspx") then return "Session abgelaufen." end
+  if not acctPage or #acctPage == 0 then return "Account page not reachable." end
+  if acctPage:find("Login%.aspx") then return "Session expired." end
 
-  -- ── Schritt 2: ASYNCPOST aufbauen ────────────────────────────────────────
+  -- ── Step 2: Build ASYNCPOST request ─────────────────────────────────────
   local hidden = extractHiddenFields(acctPage)
 
-  -- extractFormAction liest action-Attribut und dekodiert &amp; → &
-  -- Dadurch wird "./MyAccount.aspx?token=...&amp;ma=123"
-  -- zu             "./MyAccount.aspx?token=...&ma=123"
+  -- extractFormAction reads the action attribute and decodes &amp; → &
+  -- so "./MyAccount.aspx?token=...&amp;ma=123" becomes
+  --    "./MyAccount.aspx?token=...&ma=123"
   local asyncURL = resolveFormAction(
     extractFormAction(acctPage),
     "/BAY.KOL.Corp.WebSite/Pages/MyAccount.aspx"
   )
-  -- Sicherstellen dass token+ma in der URL sind
+  -- Ensure token+ma are present in the URL
   if not asyncURL:find("token=") then
     asyncURL = asyncURL .. "?token=" .. urlEncode(token) .. "&ma=" .. ma
   end
@@ -618,7 +618,7 @@ function RefreshAccount(account, since)
     { "__ASYNCPOST",                         "true" },
   }
 
-  -- Unbekannte nicht-Banner hidden-Felder ergänzen
+  -- Append any unknown non-banner hidden fields
   for name, value in pairs(hidden) do
     if not explicitSet[name] and not isBannerField(name) then
       formFields[#formFields + 1] = { name, value }
@@ -627,7 +627,7 @@ function RefreshAccount(account, since)
 
   local postBody = buildFormBody(formFields)
 
-  MM.printStatus("Umsatzabfrage (ASYNCPOST) ...")
+  MM.printStatus("Fetching transactions (ASYNCPOST)...")
   local asyncResp = connection:request(
     "POST", asyncURL, postBody,
     "application/x-www-form-urlencoded; charset=UTF-8",
@@ -641,12 +641,12 @@ function RefreshAccount(account, since)
   )
 
   if not asyncResp or #asyncResp == 0 then
-    print("ASYNCPOST: leere Antwort")
+    print("ASYNCPOST: empty response")
     return { balance = 0, transactions = {} }
   end
   print("ASYNCPOST (" .. #asyncResp .. " Bytes)")
 
-  -- ── Schritt 3: Redirect-URL aus ScriptManager-Delta-Response ────────────
+  -- ── Step 3: Extract redirect URL from ScriptManager delta response ───────
   local redirectPath = asyncResp:match("%d+|pageRedirect||([^|]+)|")
 
   if not redirectPath or #redirectPath == 0 then
@@ -657,12 +657,12 @@ function RefreshAccount(account, since)
   end
 
   if not redirectPath or #redirectPath == 0 then
-    print("Keine Redirect-URL. ASYNCPOST-Response (500 Zeichen):")
+    print("No redirect URL found. ASYNCPOST response (500 chars):")
     print(asyncResp:sub(1, 500))
     return { balance = 0, transactions = {} }
   end
 
-  -- URL-dekodieren und &amp; bereinigen
+  -- URL-decode and clean up &amp;
   redirectPath = urlDecode(redirectPath)
   redirectPath = redirectPath:gsub("&amp;", "&")
 
@@ -674,18 +674,18 @@ function RefreshAccount(account, since)
   else
     resultURL = baseURL .. "/BAY.KOL.Corp.WebSite/Pages/Deposit/" .. redirectPath
   end
-  print("Ergebnisseite: " .. resultURL)
+  print("Results page: " .. resultURL)
 
-  -- ── Schritt 4: StatementInquiryResult.aspx laden ─────────────────────────
-  MM.printStatus("Lade Ergebnisseite ...")
+  -- ── Step 4: Load StatementInquiryResult.aspx ─────────────────────────────
+  MM.printStatus("Loading results page...")
   local resultPage = connection:get(resultURL)
 
   if not resultPage or #resultPage == 0 then
-    print("Ergebnisseite leer")
+    print("Results page is empty")
     return { balance = 0, transactions = {} }
   end
   if resultPage:find("Login%.aspx") then
-    return "Session abgelaufen (Ergebnisseite)."
+    return "Session expired (results page)."
   end
 
   -- hdjsonreq Hidden Field
@@ -699,7 +699,7 @@ function RefreshAccount(account, since)
     jsonParam = decodeHtmlEntities(jsonReq)
     print("hdjsonreq: " .. jsonParam:sub(1, 150))
   else
-    print("hdjsonreq fehlt – manueller Fallback")
+    print("hdjsonreq not found – using manual fallback")
     jsonParam = string.format(
       '{"AccNo":null,"AccType":%s,"FromRequest":"%s","ToRequest":"%s",'..
       '"CustId":null,"PagingOffset":null,"PageSize":0,"SortBy":null}',
@@ -707,8 +707,8 @@ function RefreshAccount(account, since)
     )
   end
 
-  -- ── Schritt 5: GetStatementHistory ───────────────────────────────────────
-  MM.printStatus("Lade Transaktionen ...")
+  -- ── Step 5: Call GetStatementHistory ─────────────────────────────────────
+  MM.printStatus("Loading transactions...")
 
   local histURL = baseURL ..
     "/BAY.KOL.Corp.WebSite/Pages/Deposit/StatementInquiryResult.aspx/GetStatementHistory"
@@ -730,20 +730,20 @@ function RefreshAccount(account, since)
     }
   )
 
-  -- ── Schritt 6: Transaktionen parsen ──────────────────────────────────────
+  -- ── Step 6: Parse transactions ───────────────────────────────────────────
   local transactions = {}
   local balance      = nil
 
   if not histResp or #histResp == 0 then
-    print("GetStatementHistory: leere Antwort")
+    print("GetStatementHistory: empty response")
   else
     print("GetStatementHistory (" .. #histResp .. " Bytes)")
 
     local ok, outer = pcall(function() return JSON(histResp):dictionary() end)
     if not ok or not outer then
-      print("JSON äußeres Objekt nicht parsebar")
+      print("JSON outer object not parseable")
     elseif outer["d"] == nil then
-      print("Kein 'd'-Feld in Response")
+      print("No 'd' field in response")
     else
       local inner
       local dVal = outer["d"]
@@ -751,7 +751,7 @@ function RefreshAccount(account, since)
         local ok2
         ok2, inner = pcall(function() return JSON(dVal):dictionary() end)
         if not ok2 then
-          print("JSON inneres Objekt nicht parsebar")
+          print("JSON inner object not parseable")
           inner = nil
         end
       elseif type(dVal) == "table" then
@@ -759,7 +759,7 @@ function RefreshAccount(account, since)
       end
 
       if inner then
-        -- Saldo: bevorzuge LastLedgerBalanceAmount, Fallback auf letztes Balance
+        -- Balance: prefer LastLedgerBalanceAmount, fall back to last statement balance
         local llba = tonumber(inner["LastLedgerBalanceAmount"])
         if llba and llba ~= 0 then
           balance = llba
@@ -791,10 +791,10 @@ function RefreshAccount(account, since)
             end
             purpose = purpose:match("^%s*(.-)%s*$")
             if #purpose == 0 then
-              purpose = (#code > 0) and code or "Transaktion"
+              purpose = (#code > 0) and code or "Transaction"
             end
 
-            -- Saldo aus Statement-Balance (letzter Wert gewinnt)
+            -- Update running balance from statement entry (last one wins)
             if bal and bal >= 0 then
               balance = bal
             end
@@ -814,14 +814,14 @@ function RefreshAccount(account, since)
     end
   end
 
-  -- Neueste zuerst
+  -- Sort newest first
   table.sort(transactions, function(a, b)
     return a.bookingDate > b.bookingDate
   end)
 
-  -- ── Schritt 7: Saldo-Fallback via GetStatementToday ──────────────────────
+  -- ── Step 7: Balance fallback via GetStatementToday ───────────────────────
   if not balance then
-    MM.printStatus("Aktuellen Saldo laden ...")
+    MM.printStatus("Loading current balance...")
     local todayURL = baseURL ..
       "/BAY.KOL.Corp.WebSite/Pages/MyAccount.aspx/GetStatementToday"
     local todayResp = connection:request(
@@ -850,7 +850,7 @@ function RefreshAccount(account, since)
     end
   end
 
-  print(string.format("Fertig: %d Transaktionen, Saldo %.2f THB",
+  print(string.format("Done: %d transactions, balance %.2f THB",
         #transactions, balance or 0))
 
   return {
@@ -863,7 +863,7 @@ end
 -- EndSession
 -- ============================================================
 function EndSession()
-  MM.printStatus("Abmelden ...")
+  MM.printStatus("Signing out...")
   pcall(function()
     connection:get(baseURL .. "/BAY.KOL.Corp.WebSite/Common/Logout.aspx")
   end)
