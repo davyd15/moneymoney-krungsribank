@@ -1,7 +1,15 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Krungsri Bank (BAY) Thailand – Krungsri Biz Online
--- Version: 1.10 (detect interstitial pages, report errors instead of a zero balance)
+-- Version: 1.11 (all bookings of the since day, paging, balance from account page)
+--
+-- Changes in 1.11:
+--  - Deliver every booking of the requested range. since carries a time of
+--    day, so comparing timestamps dropped earlier bookings of that day
+--  - Load further statement pages (Pagination.Nextpage.PagingOffset) the way
+--    the portal's own script does
+--  - Balance from the account page, also correct without bookings in range
+--  - Sign out with the session's logout link instead of a bare Logout.aspx
 --
 -- Changes in 1.10:
 --  - Detect pages the portal shows instead of the requested one
@@ -21,7 +29,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 1.10,
+  version     = 1.11,
   url         = "https://www.krungsribizonline.com",
   services    = {"Krungsri Bank (Biz Online)"},
   description = "Krungsri Bank (BAY) Thailand – Krungsri Biz Online"
@@ -200,6 +208,16 @@ local function urlDecode(s)
   end)
 end
 
+-- Encode a Lua value as a JSON literal: string, number or null
+local function jsonValue(v)
+  if v == nil then return "null" end
+  if type(v) == "number" then return tostring(v) end
+  return '"' .. tostring(v):gsub('[%c"\\]', function(c)
+    if c == '"' or c == "\\" then return "\\" .. c end
+    return string.format("\\u%04x", c:byte())
+  end) .. '"'
+end
+
 local function buildFormBody(fields)
   local parts = {}
   for _, f in ipairs(fields) do
@@ -298,6 +316,26 @@ local function parseAccountLinks(html)
   return links
 end
 
+-- Current balance on the account page: the first of the two summary values
+-- (the second is the available balance). nil if not found.
+local function accountPageBalance(html)
+  local value = html:match('deposit_accsumbox_value">%s*(%-?[%d,]+%.%d+)')
+  return value and tonumber((value:gsub(",", "")))
+end
+
+-- GetStatementHistory answers {"d": "<JSON string>"}. Returns the inner table,
+-- {} for an empty "d" (no data), or nil if the response is not readable.
+local function parseHistoryResponse(resp)
+  local ok, outer = pcall(function() return JSON(resp):dictionary() end)
+  if not ok or type(outer) ~= "table" then return nil end
+  local d = outer["d"]
+  if type(d) == "table" then return d end
+  if type(d) ~= "string" then return nil end
+  if #d == 0 then return {} end
+  local ok2, inner = pcall(function() return JSON(d):dictionary() end)
+  return (ok2 and type(inner) == "table") and inner or nil
+end
+
 -- Parse onclick string → {target, argument} or nil
 local function parseDoPostBack(onclickStr)
   if not onclickStr then return nil end
@@ -337,6 +375,8 @@ end
 local connection = nil
 -- Account tokens from the post-login page, ma → token (fresher than LocalStorage)
 local sessionTokens = {}
+-- Logout link of the current session (Logout.aspx needs its token)
+local sessionLogoutURL = nil
 
 -- ============================================================
 -- SupportsBank
@@ -351,6 +391,7 @@ end
 -- ============================================================
 function InitializeSession(protocol, bankCode, username, reserved, password)
   connection = Connection()
+  sessionLogoutURL = nil
   connection.language  = "en-US,en;q=0.9,th;q=0.8"
   connection.useragent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " ..
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -472,6 +513,12 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   for _, link in ipairs(parseAccountLinks(loginResp)) do
     sessionTokens[link.ma] = link.token
   end
+
+  -- Every logged-in page links to Logout.aspx with the session's token;
+  -- without it the portal answers "Invalid Session"
+  local logoutToken = loginResp:match("Logout%.aspx%?token=([^&\"']+)&amp;rd=logout")
+  sessionLogoutURL = logoutToken and
+    (baseURL .. "/BAY.KOL.Corp.WebSite/Common/Logout.aspx?token=" .. logoutToken .. "&rd=logout")
 
   MM.printStatus("Successfully signed in.")
   print("Login OK")
@@ -611,6 +658,9 @@ function RefreshAccount(account, since)
   if not acctPage or #acctPage == 0 then return "Account page not reachable." end
   local pageError = checkPage(acctPage, "MyAccount.aspx")
   if pageError then return pageError end
+
+  local pageBalance = accountPageBalance(acctPage)
+  print("Balance on account page: " .. tostring(pageBalance))
 
   -- ── Step 2: Build ASYNCPOST request ─────────────────────────────────────
   local hidden = extractHiddenFields(acctPage)
@@ -774,69 +824,89 @@ function RefreshAccount(account, since)
   end
 
   -- ── Step 5: Call GetStatementHistory ─────────────────────────────────────
+  -- Page by page, like the portal's own script: as long as a response carries
+  -- Pagination.Nextpage.PagingOffset, ask for the next page with that offset.
   MM.printStatus("Loading transactions...")
 
   local histURL = baseURL ..
     "/BAY.KOL.Corp.WebSite/Pages/Deposit/StatementInquiryResult.aspx/GetStatementHistory"
 
-  local jsonParamEsc = jsonParam:gsub('\\', '\\\\'):gsub('"', '\\"')
-  local reqBody = string.format(
-    '{"pageIndex":1,"pageoffset":null,"language":"EN","jsonparam":"%s"}',
-    jsonParamEsc
-  )
+  local maxPages    = 50
+  local stmts       = {}
+  local seenStmts   = {}
+  local seenOffsets = {}
+  local llba        = nil
+  local pageOffset  = nil
+  local complete    = false
 
-  local histResp = connection:request(
-    "POST", histURL, reqBody,
-    "application/json; charset=UTF-8",
-    {
-      ["Accept"]           = "application/json, text/javascript, */*; q=0.01",
-      ["X-Requested-With"] = "XMLHttpRequest",
-      ["Referer"]          = resultURL,
-      ["Origin"]           = baseURL,
-    }
-  )
+  for pageIndex = 1, maxPages do
+    local reqBody = string.format(
+      '{"pageIndex":%d,"pageoffset":%s,"language":"EN","jsonparam":%s}',
+      pageIndex, jsonValue(pageOffset), jsonValue(jsonParam)
+    )
+
+    local histResp = connection:request(
+      "POST", histURL, reqBody,
+      "application/json; charset=UTF-8",
+      {
+        ["Accept"]           = "application/json, text/javascript, */*; q=0.01",
+        ["X-Requested-With"] = "XMLHttpRequest",
+        ["Referer"]          = resultURL,
+        ["Origin"]           = baseURL,
+      }
+    )
+    if not histResp or #histResp == 0 then
+      return "Transaction history could not be loaded (empty response)."
+    end
+
+    local page = parseHistoryResponse(histResp)
+    if not page then
+      print("Unexpected response (300 chars): " .. histResp:sub(1, 300))
+      return "Transaction history could not be read."
+    end
+
+    -- A row the portal hands over twice would be imported twice. Time, amount
+    -- and running balance together identify a booking.
+    local pageStmts = type(page["Statements"]) == "table" and page["Statements"] or {}
+    for _, s in ipairs(pageStmts) do
+      local key = table.concat({ tostring(s["BookingDateTime"]), tostring(s["MneIndicator"]),
+                                 tostring(s["Amount"]), tostring(s["Balance"]) }, "|")
+      if seenStmts[key] then
+        print("Skipping repeated statement: " .. key)
+      else
+        seenStmts[key] = true
+        stmts[#stmts + 1] = s
+      end
+    end
+    if pageIndex == 1 then llba = tonumber(page["LastLedgerBalanceAmount"]) end
+
+    local pagination = page["Pagination"]
+    local nextPage   = type(pagination) == "table" and pagination["Nextpage"]
+    pageOffset = type(nextPage) == "table" and nextPage["PagingOffset"] or nil
+    print(string.format("Page %d: %d statements, next offset: %s",
+          pageIndex, #pageStmts, tostring(pageOffset)))
+
+    if type(pageOffset) ~= "string" and type(pageOffset) ~= "number" or pageOffset == "" then
+      complete = true
+      break
+    end
+    local offsetKey = tostring(pageOffset)
+    if seenOffsets[offsetKey] then
+      return "Krungsri Biz Online repeated a statement page. Refresh stopped, please try again later."
+    end
+    seenOffsets[offsetKey] = true
+  end
+
+  if not complete then
+    return "Krungsri Biz Online returned more than " .. maxPages ..
+           " statement pages. Refresh stopped to avoid an endless loop."
+  end
 
   -- ── Step 6: Parse transactions ───────────────────────────────────────────
+  -- Everything the portal returns for the requested range goes to MoneyMoney,
+  -- which skips what it already has. since carries a time of day, so
+  -- comparing against it would drop earlier bookings of the since day.
   local transactions = {}
-  local balance      = nil
-
-  if not histResp or #histResp == 0 then
-    return "Transaction history could not be loaded (empty response)."
-  end
-  print("GetStatementHistory (" .. #histResp .. " Bytes)")
-
-  local ok, outer = pcall(function() return JSON(histResp):dictionary() end)
-  if not ok or type(outer) ~= "table" or outer["d"] == nil then
-    print("Unexpected response (300 chars): " .. histResp:sub(1, 300))
-    return "Transaction history could not be read."
-  end
-
-  -- "d" holds the result as a JSON string; an empty string means no data
-  local inner = outer["d"]
-  if type(inner) == "string" then
-    if #inner == 0 then
-      inner = {}
-    else
-      local ok2
-      ok2, inner = pcall(function() return JSON(outer["d"]):dictionary() end)
-      if not ok2 then inner = nil end
-    end
-  end
-  if type(inner) ~= "table" then
-    print("Unexpected 'd' field (300 chars): " .. tostring(outer["d"]):sub(1, 300))
-    return "Transaction history could not be read."
-  end
-
-  -- All plain fields of the response, to spot paging or error hints in the log
-  local fields = {}
-  for k, v in pairs(inner) do
-    if type(v) ~= "table" then fields[#fields + 1] = k .. "=" .. tostring(v) end
-  end
-  table.sort(fields)
-  print("Response fields: " .. table.concat(fields, ", "))
-
-  local stmts = inner["Statements"]
-  if type(stmts) ~= "table" then stmts = {} end
   print("Statements: " .. #stmts)
 
   -- Running balance after each booking, in the portal's list order
@@ -849,7 +919,7 @@ function RefreshAccount(account, since)
       balances[#balances + 1] = { date = bookingDate, value = bal }
     end
 
-    if bookingDate and (not since or bookingDate >= since) then
+    if bookingDate then
       local amt  = tonumber(s["Amount"])    or 0
       local mne  = s["MneIndicator"]        or ""
       local desc = stripHtml(s["Description"] or "")
@@ -883,17 +953,19 @@ function RefreshAccount(account, since)
     end
   end
 
-  -- Balance: running balance after the newest booking. The newest booking
-  -- sits at one end of the list, whichever way the portal sorts it; on a
-  -- single day the last entry wins. Without bookings use LastLedgerBalanceAmount.
-  local llba = tonumber(inner["LastLedgerBalanceAmount"])
+  -- Balance: the current balance from the account page. If it cannot be read,
+  -- the running balance after the newest booking (the newest booking sits at
+  -- one end of the list, whichever way the portal sorts it; on a single day
+  -- the last entry wins), then LastLedgerBalanceAmount (in practice 0).
+  local balance = pageBalance
   if #balances > 0 then
     local first, last = balances[1], balances[#balances]
     local newest = (first.date > last.date) and first or last
-    balance = newest.value
-    print(string.format("Balance after newest booking (%s): %.2f, LastLedgerBalanceAmount: %s",
-          os.date("%d.%m.%Y", newest.date), balance, tostring(llba)))
-  elseif llba and llba ~= 0 then
+    print(string.format("Balance after newest booking (%s): %.2f",
+          os.date("%d.%m.%Y", newest.date), newest.value))
+    balance = balance or newest.value
+  end
+  if not balance and llba and llba ~= 0 then
     balance = llba
   end
 
@@ -948,7 +1020,7 @@ end
 function EndSession()
   MM.printStatus("Signing out...")
   pcall(function()
-    connection:get(baseURL .. "/BAY.KOL.Corp.WebSite/Common/Logout.aspx")
+    connection:get(sessionLogoutURL or (baseURL .. "/BAY.KOL.Corp.WebSite/Common/Logout.aspx"))
   end)
   return nil
 end

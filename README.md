@@ -103,6 +103,7 @@ cp moneymoney-krungsribank/KrungsriBank.lua \
 
 | Version | Changes |
 |---------|---------|
+| 1.11 | Deliver all bookings of the first requested day; load further statement pages; balance from the account page; sign out with the session's logout link |
 | 1.10 | Detect one-time portal pages (e.g. e-mail verification) and show a clear message; report failed requests as errors instead of a zero balance; balance from the newest booking; date range in Thai time |
 | 1.09 | Fix HTML entity decoding for form action URLs (`&amp;` → `&` in ASYNCPOST) |
 | 1.00 | Initial public release |
