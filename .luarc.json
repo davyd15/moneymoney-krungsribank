@@ -7,7 +7,7 @@
     "ProtocolWebBanking",
     "AccountTypeCreditCard", "AccountTypeFixedTermDeposit", "AccountTypeGiro",
     "AccountTypeLoan", "AccountTypeOther", "AccountTypePortfolio",
-    "AccountTypeSavings"
+    "AccountTypeSavings", "LoginFailed"
   ],
   "diagnostics.disable": ["lowercase-global"]
 }

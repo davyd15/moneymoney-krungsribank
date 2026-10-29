@@ -95,10 +95,15 @@ cp moneymoney-krungsribank/KrungsriBank.lua \
 **Transactions missing / history too short**
 - The portal limits history to 180 days. Older transactions cannot be retrieved.
 
+**"Krungsri Biz Online shows an additional page (…)"**
+- After login the portal sometimes asks for a one-time step, e.g. confirming your e-mail address with a code (`VerifyEmail.aspx`) or accepting new terms.
+- Sign in once at [https://www.krungsribizonline.com](https://www.krungsribizonline.com) in your browser, complete that step, then refresh in MoneyMoney again.
+
 ## Changelog
 
 | Version | Changes |
 |---------|---------|
+| 1.10 | Detect one-time portal pages (e.g. e-mail verification) and show a clear message; report failed requests as errors instead of a zero balance; balance from the newest booking; date range in Thai time |
 | 1.09 | Fix HTML entity decoding for form action URLs (`&amp;` → `&` in ASYNCPOST) |
 | 1.00 | Initial public release |
 

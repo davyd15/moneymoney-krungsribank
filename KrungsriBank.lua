@@ -1,7 +1,17 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Krungsri Bank (BAY) Thailand – Krungsri Biz Online
--- Version: 1.09
+-- Version: 1.10 (detect interstitial pages, report errors instead of a zero balance)
+--
+-- Changes in 1.10:
+--  - Detect pages the portal shows instead of the requested one
+--    (e.g. one-time e-mail verification) and report them clearly
+--  - Failed requests now return an error instead of balance 0 and
+--    no transactions
+--  - Use the fresh account token from the post-login page
+--  - Balance taken from the newest statement regardless of list order
+--  - Date range computed in Thai time (UTC+7), the bank's calendar
+--  - Log the statement response fields for paging diagnostics
 --
 -- Changes in 1.09:
 --  - Decode HTML entities in form action after regex extraction
@@ -11,7 +21,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 1.09,
+  version     = 1.10,
   url         = "https://www.krungsribizonline.com",
   services    = {"Krungsri Bank (Biz Online)"},
   description = "Krungsri Bank (BAY) Thailand – Krungsri Biz Online"
@@ -172,8 +182,10 @@ local function decodeHtmlEntities(s)
           :gsub("&#x(%x+);", function(h) return string.char(tonumber(h,16)) end)
 end
 
-local function toIsoDateTime(ts)
-  return os.date("%Y-%m-%dT%H:%M:%S", ts)
+-- Format a timestamp in Thai time (UTC+7, no daylight saving time).
+-- The portal works with Thai calendar days, wherever the Mac is.
+local function thaiTime(format, ts)
+  return os.date("!" .. format, ts + 7 * 3600)
 end
 
 local function urlEncode(s)
@@ -246,6 +258,46 @@ local function resolveFormAction(action, basePath)
   return baseURL .. baseDir .. "/" .. action
 end
 
+-- Name of the ASP.NET page that rendered this HTML (e.g. "MyAccount.aspx").
+-- Every page posts its form back to itself, so the form action shows which
+-- page the portal really delivered after redirects. nil if not recognisable.
+local function pageName(html)
+  local action = html and extractFormAction(html)
+  return action and action:match("([%w_]+%.aspx)")
+end
+
+-- Error message if the portal delivered another page than the expected one
+-- (expired session, one-time verification, consent page ...), nil otherwise.
+-- An unrecognisable page is not treated as an error.
+local function checkPage(html, expected)
+  local page = pageName(html)
+  if not page or page == expected then return nil end
+  print("Expected " .. expected .. ", portal delivered " .. page)
+  if page == "Login.aspx" or page == "ErrorSession.aspx" then
+    return "Session expired. Please refresh again."
+  end
+  return "Krungsri Biz Online shows an additional page (" .. page .. "). " ..
+         "Please sign in once at www.krungsribizonline.com in your browser " ..
+         "and complete that step, then refresh again."
+end
+
+-- Account links on the portfolio page → list of {token, ma} in page order
+local function parseAccountLinks(html)
+  local seen, links = {}, {}
+  for _, pattern in ipairs({
+    "MyAccount%.aspx%?token=([^&\"<]+)&amp;ma=(%d+)",
+    "MyAccount%.aspx%?token=([^&\"<]+)&ma=(%d+)",
+  }) do
+    for token, ma in html:gmatch(pattern) do
+      if not seen[ma] then
+        seen[ma] = true
+        links[#links + 1] = { token = urlDecode(token), ma = ma }
+      end
+    end
+  end
+  return links
+end
+
 -- Parse onclick string → {target, argument} or nil
 local function parseDoPostBack(onclickStr)
   if not onclickStr then return nil end
@@ -281,7 +333,10 @@ end
 -- ============================================================
 -- Global Session State
 -- ============================================================
+---@type any  Connection object, created in InitializeSession
 local connection = nil
+-- Account tokens from the post-login page, ma → token (fresher than LocalStorage)
+local sessionTokens = {}
 
 -- ============================================================
 -- SupportsBank
@@ -406,6 +461,18 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
     return LoginFailed
   end
 
+  local landing = pageName(loginResp)
+  print("Landing page: " .. (landing or "unknown"))
+  if landing == "ErrorSession.aspx" then
+    return "Krungsri Biz Online ended the session right after login. Please refresh again."
+  end
+
+  -- The portfolio page after login carries fresh account tokens
+  sessionTokens = {}
+  for _, link in ipairs(parseAccountLinks(loginResp)) do
+    sessionTokens[link.ma] = link.token
+  end
+
   MM.printStatus("Successfully signed in.")
   print("Login OK")
   return nil
@@ -421,23 +488,12 @@ function ListAccounts(knownAccounts)
   local content, charset = connection:get(portfolioURL)
 
   if not content or #content == 0 then return "Portfolio page not reachable." end
-  if content:find("Login%.aspx") then return "Session expired." end
+  local pageError = checkPage(content, "MyPortfolio.aspx")
+  if pageError then return pageError end
 
-  local seen, accountLinks = {}, {}
-  local function addLink(token, ma)
-    if not seen[ma] then
-      seen[ma] = true
-      token = urlDecode(token)
-      table.insert(accountLinks, { token = token, ma = ma })
-      print("Account link: ma=" .. ma)
-    end
-  end
-
-  for token, ma in content:gmatch("MyAccount%.aspx%?token=([^&\"<]+)&amp;ma=(%d+)") do
-    addLink(token, ma)
-  end
-  for token, ma in content:gmatch("MyAccount%.aspx%?token=([^&\"<]+)&ma=(%d+)") do
-    addLink(token, ma)
+  local accountLinks = parseAccountLinks(content)
+  for _, link in ipairs(accountLinks) do
+    print("Account link: ma=" .. link.ma)
   end
 
   if #accountLinks == 0 then
@@ -456,10 +512,11 @@ function ListAccounts(knownAccounts)
     MM.printStatus("Loading account details (ma=" .. link.ma .. ")...")
     local acctContent = connection:get(acctURL)
 
+    pageError = checkPage(acctContent, "MyAccount.aspx")
+    if pageError then return pageError end
+
     if not acctContent or #acctContent == 0 then
       print("ma=" .. link.ma .. ": empty response")
-    elseif acctContent:find("Login%.aspx") then
-      print("ma=" .. link.ma .. ": session expired")
     else
       local ddlVal =
         acctContent:match('ddlAccountNickName[^>]*>%s*<option[^>]+selected[^>]*value="([^"]+)"') or
@@ -521,32 +578,39 @@ function RefreshAccount(account, since)
   local acctNo  = account.accountNumber
   MM.printStatus("Refreshing " .. acctNo .. "...")
 
-  local token   = LocalStorage[acctNo .. "_token"]
   local ma      = LocalStorage[acctNo .. "_ma"]
   local ddlVal  = LocalStorage[acctNo .. "_ddl"]
   local accType = LocalStorage[acctNo .. "_acctype"] or "1"
 
+  -- Prefer the token from this session's post-login page
+  if ma and sessionTokens[ma] then
+    LocalStorage[acctNo .. "_token"] = sessionTokens[ma]
+  end
+  local token = LocalStorage[acctNo .. "_token"]
+
   if not token or not ma then
-    return "No session data – please sign in again."
+    return "No session data. Please sign in again."
   end
 
   local acctURL = baseURL ..
     "/BAY.KOL.Corp.WebSite/Pages/MyAccount.aspx" ..
     "?token=" .. urlEncode(token) .. "&ma=" .. ma
 
-  local maxAgo   = os.time() - 180 * 24 * 3600
+  local now      = os.time()
+  local maxAgo   = now - 180 * 24 * 3600
   local fromTS   = (since and since > maxAgo) and since or maxAgo
-  local fromDate = os.date("%d/%m/%Y", fromTS)
-  local toDate   = os.date("%d/%m/%Y", os.time())
-  local fromISO  = toIsoDateTime(fromTS)
-  local toISO    = toIsoDateTime(os.time())
-  print("Date range: " .. fromDate .. " – " .. toDate)
+  local fromDate = thaiTime("%d/%m/%Y", fromTS)
+  local toDate   = thaiTime("%d/%m/%Y", now)
+  local fromISO  = thaiTime("%Y-%m-%dT%H:%M:%S", fromTS)
+  local toISO    = thaiTime("%Y-%m-%dT%H:%M:%S", now)
+  print("Date range: " .. fromDate .. " to " .. toDate)
 
   -- ── Step 1: Load account page ────────────────────────────────────────────
   MM.printStatus("Loading account page...")
   local acctPage = connection:get(acctURL)
   if not acctPage or #acctPage == 0 then return "Account page not reachable." end
-  if acctPage:find("Login%.aspx") then return "Session expired." end
+  local pageError = checkPage(acctPage, "MyAccount.aspx")
+  if pageError then return pageError end
 
   -- ── Step 2: Build ASYNCPOST request ─────────────────────────────────────
   local hidden = extractHiddenFields(acctPage)
@@ -641,8 +705,7 @@ function RefreshAccount(account, since)
   )
 
   if not asyncResp or #asyncResp == 0 then
-    print("ASYNCPOST: empty response")
-    return { balance = 0, transactions = {} }
+    return "Statement request failed (empty response)."
   end
   print("ASYNCPOST (" .. #asyncResp .. " Bytes)")
 
@@ -659,7 +722,12 @@ function RefreshAccount(account, since)
   if not redirectPath or #redirectPath == 0 then
     print("No redirect URL found. ASYNCPOST response (500 chars):")
     print(asyncResp:sub(1, 500))
-    return { balance = 0, transactions = {} }
+    local bankMsg = asyncResp:match('hdErrorMsgEN"[^>]-value="([^"]+)"')
+    if bankMsg then
+      return "Krungsri Biz Online rejected the statement request: " ..
+             stripHtml(bankMsg)
+    end
+    return "Krungsri Biz Online did not return the statement page."
   end
 
   -- URL-decode and clean up &amp;
@@ -681,12 +749,10 @@ function RefreshAccount(account, since)
   local resultPage = connection:get(resultURL)
 
   if not resultPage or #resultPage == 0 then
-    print("Results page is empty")
-    return { balance = 0, transactions = {} }
+    return "Statement page could not be loaded (empty response)."
   end
-  if resultPage:find("Login%.aspx") then
-    return "Session expired (results page)."
-  end
+  pageError = checkPage(resultPage, "StatementInquiryResult.aspx")
+  if pageError then return pageError end
 
   -- hdjsonreq Hidden Field
   local jsonReq =
@@ -735,83 +801,100 @@ function RefreshAccount(account, since)
   local balance      = nil
 
   if not histResp or #histResp == 0 then
-    print("GetStatementHistory: empty response")
-  else
-    print("GetStatementHistory (" .. #histResp .. " Bytes)")
+    return "Transaction history could not be loaded (empty response)."
+  end
+  print("GetStatementHistory (" .. #histResp .. " Bytes)")
 
-    local ok, outer = pcall(function() return JSON(histResp):dictionary() end)
-    if not ok or not outer then
-      print("JSON outer object not parseable")
-    elseif outer["d"] == nil then
-      print("No 'd' field in response")
+  local ok, outer = pcall(function() return JSON(histResp):dictionary() end)
+  if not ok or type(outer) ~= "table" or outer["d"] == nil then
+    print("Unexpected response (300 chars): " .. histResp:sub(1, 300))
+    return "Transaction history could not be read."
+  end
+
+  -- "d" holds the result as a JSON string; an empty string means no data
+  local inner = outer["d"]
+  if type(inner) == "string" then
+    if #inner == 0 then
+      inner = {}
     else
-      local inner
-      local dVal = outer["d"]
-      if type(dVal) == "string" and #dVal > 0 then
-        local ok2
-        ok2, inner = pcall(function() return JSON(dVal):dictionary() end)
-        if not ok2 then
-          print("JSON inner object not parseable")
-          inner = nil
-        end
-      elseif type(dVal) == "table" then
-        inner = dVal
+      local ok2
+      ok2, inner = pcall(function() return JSON(outer["d"]):dictionary() end)
+      if not ok2 then inner = nil end
+    end
+  end
+  if type(inner) ~= "table" then
+    print("Unexpected 'd' field (300 chars): " .. tostring(outer["d"]):sub(1, 300))
+    return "Transaction history could not be read."
+  end
+
+  -- All plain fields of the response, to spot paging or error hints in the log
+  local fields = {}
+  for k, v in pairs(inner) do
+    if type(v) ~= "table" then fields[#fields + 1] = k .. "=" .. tostring(v) end
+  end
+  table.sort(fields)
+  print("Response fields: " .. table.concat(fields, ", "))
+
+  local stmts = inner["Statements"]
+  if type(stmts) ~= "table" then stmts = {} end
+  print("Statements: " .. #stmts)
+
+  -- Running balance after each booking, in the portal's list order
+  local balances = {}
+
+  for _, s in ipairs(stmts) do
+    local bookingDate = parseDate(s["BookingDateTime"] or "")
+    local bal         = tonumber(s["Balance"])
+    if bookingDate and bal and bal >= 0 then
+      balances[#balances + 1] = { date = bookingDate, value = bal }
+    end
+
+    if bookingDate and (not since or bookingDate >= since) then
+      local amt  = tonumber(s["Amount"])    or 0
+      local mne  = s["MneIndicator"]        or ""
+      local desc = stripHtml(s["Description"] or "")
+      local cat  = s["TransactionCategory"] or ""
+      local code = s["MneCode"]             or ""
+      local orig = s["ExtendedOrigin"]      or ""
+
+      local amount = (mne == "DBIT") and -amt or amt
+
+      local purpose = desc
+      if #cat  > 0 and cat ~= desc then
+        purpose = purpose .. " [" .. cat .. "]"
+      end
+      if #orig > 0 then
+        purpose = purpose .. " (" .. orig .. ")"
+      end
+      purpose = purpose:match("^%s*(.-)%s*$")
+      if #purpose == 0 then
+        purpose = (#code > 0) and code or "Transaction"
       end
 
-      if inner then
-        -- Balance: prefer LastLedgerBalanceAmount, fall back to last statement balance
-        local llba = tonumber(inner["LastLedgerBalanceAmount"])
-        if llba and llba ~= 0 then
-          balance = llba
-        end
-
-        local stmts = inner["Statements"]
-        if type(stmts) ~= "table" then stmts = {} end
-        print("Statements: " .. #stmts)
-
-        for _, s in ipairs(stmts) do
-          local bookingDate = parseDate(s["BookingDateTime"] or "")
-          if bookingDate and (not since or bookingDate >= since) then
-            local amt  = tonumber(s["Amount"])    or 0
-            local bal  = tonumber(s["Balance"])
-            local mne  = s["MneIndicator"]        or ""
-            local desc = stripHtml(s["Description"] or "")
-            local cat  = s["TransactionCategory"] or ""
-            local code = s["MneCode"]             or ""
-            local orig = s["ExtendedOrigin"]      or ""
-
-            local amount = (mne == "DBIT") and -amt or amt
-
-            local purpose = desc
-            if #cat  > 0 and cat ~= desc then
-              purpose = purpose .. " [" .. cat .. "]"
-            end
-            if #orig > 0 then
-              purpose = purpose .. " (" .. orig .. ")"
-            end
-            purpose = purpose:match("^%s*(.-)%s*$")
-            if #purpose == 0 then
-              purpose = (#code > 0) and code or "Transaction"
-            end
-
-            -- Update running balance from statement entry (last one wins)
-            if bal and bal >= 0 then
-              balance = bal
-            end
-
-            if amount ~= 0 then
-              table.insert(transactions, {
-                bookingDate = bookingDate,
-                purpose     = purpose,
-                amount      = amount,
-                currency    = s["AmountCurrency"] or "THB",
-                booked      = true,
-              })
-            end
-          end
-        end
+      if amount ~= 0 then
+        table.insert(transactions, {
+          bookingDate = bookingDate,
+          purpose     = purpose,
+          amount      = amount,
+          currency    = s["AmountCurrency"] or "THB",
+          booked      = true,
+        })
       end
     end
+  end
+
+  -- Balance: running balance after the newest booking. The newest booking
+  -- sits at one end of the list, whichever way the portal sorts it; on a
+  -- single day the last entry wins. Without bookings use LastLedgerBalanceAmount.
+  local llba = tonumber(inner["LastLedgerBalanceAmount"])
+  if #balances > 0 then
+    local first, last = balances[1], balances[#balances]
+    local newest = (first.date > last.date) and first or last
+    balance = newest.value
+    print(string.format("Balance after newest booking (%s): %.2f, LastLedgerBalanceAmount: %s",
+          os.date("%d.%m.%Y", newest.date), balance, tostring(llba)))
+  elseif llba and llba ~= 0 then
+    balance = llba
   end
 
   -- Sort newest first
@@ -836,14 +919,14 @@ function RefreshAccount(account, since)
       }
     )
     if todayResp and #todayResp > 0 then
-      local ok, outer = pcall(function() return JSON(todayResp):dictionary() end)
-      if ok and outer and outer["d"] then
-        local dv = outer["d"]
-        local ok2, inner = pcall(function()
+      local okOuter, todayOuter = pcall(function() return JSON(todayResp):dictionary() end)
+      if okOuter and todayOuter and todayOuter["d"] then
+        local dv = todayOuter["d"]
+        local okInner, todayInner = pcall(function()
           return JSON(type(dv)=="string" and dv or "{}"):dictionary()
         end)
-        if ok2 and inner then
-          local b = tonumber(inner["LastLedgerBalanceAmount"])
+        if okInner and todayInner then
+          local b = tonumber(todayInner["LastLedgerBalanceAmount"])
           if b and b ~= 0 then balance = b end
         end
       end
